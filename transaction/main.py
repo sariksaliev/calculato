@@ -9,7 +9,7 @@ def main():
         level=logging.INFO
     )
 
-    print("[SYSTEM] Запуск бота...")
+    print( "[SYSTEM] Запуск бота...")
 
     # Вставьте сюда ваш токен
     TOKEN = "8298002084:AAGv1V8mWeBfuJbTNBILyE5vtUTvg54Luhk"
