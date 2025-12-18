@@ -17,62 +17,60 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 
 
+def detect_network(address: str) -> str:
+    if address.startswith("0x"):
+        return "BSC / EVM"
+    if address.startswith("T"):
+        return "TRC20"
+    return "UNKNOWN"
+
+
 class TransactionCalculator:
     """
-    ЛОГИКА:
-    - Любая строка, начинающаяся с '#', считается названием кошелька (как есть).
-    - Каждая строка 'Received: ...' = одна транзакция.
-    - Транзакция относится к последнему увиденному кошельку.
-    - Кошельки считаются по уникальным хэштегам.
+    Логика:
+    - каждая строка Received = транзакция
+    - кошелёк определяется по `from <ADDRESS>`
+    - группировка и суммирование ТОЛЬКО по адресу
     """
 
     def __init__(self):
-        # wallet_name -> list of transactions
-        self.transactions = defaultdict(list)
+        # address -> { currency -> amount }
+        self.wallets = defaultdict(lambda: defaultdict(float))
+        self.tx_count = 0
 
     def add_transactions(self, text: str) -> int:
-        current_wallet = None
         added = 0
 
-        for raw in text.splitlines():
-            line = raw.strip()
+        for line in text.splitlines():
+            line = line.strip()
             if not line:
                 continue
 
-            # 1️⃣ Любой хэштег = имя кошелька (БЕЗ анализа)
-            if line.startswith("#"):
-                # убираем #, сохраняем текст как есть
-                current_wallet = line[1:].strip()
-                continue
-
-            if not current_wallet:
-                continue
-
-            # 2️⃣ Каждая строка Received = транзакция
-            match = re.search(
-                r"Received:\s*([\d.]+)\s*#?([A-Za-z]{2,10})",
+            # Ищем строку Received
+            m = re.search(
+                r"Received:\s*([\d.]+)\s*#?([A-Za-z]{2,10}).*?from\s+([A-Za-z0-9\.]+)",
                 line,
                 re.IGNORECASE
             )
-            if not match:
+            if not m:
                 continue
 
-            amount = float(match.group(1))
-            currency = match.group(2).upper()
+            amount = float(m.group(1))
+            currency = m.group(2).upper()
+            address = m.group(3)
 
-            self.transactions[current_wallet].append({
-                "amount": amount,
-                "currency": currency
-            })
+            self.wallets[address][currency] += amount
+            self.tx_count += 1
             added += 1
 
         return added
 
     def clear(self):
-        self.transactions.clear()
+        self.wallets.clear()
+        self.tx_count = 0
 
     def get_report(self) -> str:
-        if not self.transactions:
+        if not self.wallets:
             return "📭 Нет транзакций для отчёта."
 
         lines = []
@@ -80,24 +78,24 @@ class TransactionCalculator:
         lines.append(f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
         lines.append("─" * 40)
 
-        total_transactions = 0
-        total_sum = 0.0
+        total_sum = defaultdict(float)
 
-        for wallet, txs in self.transactions.items():
-            wallet_sum = 0.0
+        for address, currencies in self.wallets.items():
+            network = detect_network(address)
+            lines.append(f"\n💼 Wallet: {address}")
+            lines.append(f"🌐 Network: {network}")
 
-            for tx in txs:
-                wallet_sum += tx["amount"]
-                total_transactions += 1
-
-            lines.append(f"\n{wallet}: {wallet_sum:.2f} USDT")
-            total_sum += wallet_sum
+            for currency, amount in currencies.items():
+                lines.append(f"{currency}: {amount:.2f}")
+                total_sum[currency] += amount
 
         lines.append("\n" + "═" * 40)
         lines.append("📈 ОБЩАЯ СТАТИСТИКА:")
-        lines.append(f"• Кошельков: {len(self.transactions)}")
-        lines.append(f"• Транзакций: {total_transactions}")
-        lines.append(f"• Общая сумма: {total_sum:.2f} USDT")
+        lines.append(f"• Кошельков: {len(self.wallets)}")
+        lines.append(f"• Транзакций: {self.tx_count}")
+
+        for currency, amount in total_sum.items():
+            lines.append(f"• Всего {currency}: {amount:.2f}")
 
         return "\n".join(lines)
 
@@ -116,23 +114,18 @@ class TransactionBot:
         await update.message.reply_text(
             "🤖 Калькулятор транзакций\n\n"
             "Просто пересылайте сообщения с транзакциями.\n"
-            "Бот сам определит кошельки по хэштегам.\n\n"
+            "Бот сам сгруппирует по кошелькам (адресам).\n\n"
             "Команды:\n"
-            "/finish_count — сформировать отчет\n"
-            "/clear — очистить данные"
+            "/finish_count — отчет\n"
+            "/clear — очистить"
         )
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         added = self.calc.add_transactions(update.message.text)
-
-        if added > 0:
-            await update.message.reply_text(
-                f"✅ Добавлено транзакций: {added}"
-            )
+        if added:
+            await update.message.reply_text(f"✅ Добавлено транзакций: {added}")
         else:
-            await update.message.reply_text(
-                "ℹ️ Сообщение не содержит транзакций."
-            )
+            await update.message.reply_text("ℹ️ Транзакции не найдены.")
 
     async def finish(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = self.calc.get_report()
@@ -141,7 +134,7 @@ class TransactionBot:
 
     async def clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self.calc.clear()
-        await update.message.reply_text("🗑 Все данные очищены.")
+        await update.message.reply_text("🗑 Данные очищены.")
 
     def run(self):
         self.app.run_polling()
