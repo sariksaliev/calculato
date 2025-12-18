@@ -1,18 +1,26 @@
 # bot.py
 import re
+import logging
 from collections import defaultdict
 from datetime import datetime
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram import Update
 
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
 
 class TransactionCalculator:
     def __init__(self):
-        self.transactions = defaultdict(lambda: defaultdict(float))
+        self.transactions = defaultdict(list)
         self.rates = {
             'USDT': 1.0, 'USDC': 1.0, 'BNB': 886.0, 'TRX': 0.12,
             'ETH': 3500.0, 'BTC': 68000.0, 'SOL': 150.0,
         }
+        self.total_transactions_added = 0
 
     def add_transactions(self, text):
         lines = text.strip().split('\n')
@@ -25,6 +33,7 @@ class TransactionCalculator:
                 continue
 
             line_lower = line.lower()
+
             if 'oscar' in line_lower and 'max' in line_lower and 'bnb' in line_lower:
                 current_wallet = 'oscar_max_bnb'
                 continue
@@ -34,10 +43,15 @@ class TransactionCalculator:
             elif 'jack' in line_lower and 'med' in line_lower and 'trc' in line_lower:
                 current_wallet = 'jack_trc20'
                 continue
+            elif 'oscar' in line_lower and 'max' in line_lower and 'trc' in line_lower:
+                current_wallet = 'oscar_max_trc20'
+                continue
             elif line.startswith('#'):
                 content = line[1:].lower().strip()
-                if 'oscar' in content and 'max' in content:
+                if 'oscar' in content and 'max' in content and 'bnb' in content:
                     current_wallet = 'oscar_max_bnb'
+                elif 'oscar' in content and 'max' in content and 'trc' in content:
+                    current_wallet = 'oscar_max_trc20'
                 elif 'oscar' in content and ('mini' in content or 'mimi' in content):
                     current_wallet = 'oscar_mini_bnb'
                 elif 'jack' in content:
@@ -47,9 +61,13 @@ class TransactionCalculator:
             if current_wallet and 'received:' in line_lower:
                 amount, currency = self._extract_transaction(line)
                 if amount and currency:
-                    self.transactions[current_wallet][currency] += amount
+                    self.transactions[current_wallet].append({
+                        'amount': amount,
+                        'currency': currency
+                    })
                     transactions_added += 1
 
+        self.total_transactions_added += transactions_added
         return transactions_added
 
     def _extract_transaction(self, line):
@@ -95,15 +113,24 @@ class TransactionCalculator:
         report_lines.append("─" * 40)
 
         total_all_usd = 0
+        total_wallets = len(self.transactions)
+        total_transactions = self.total_transactions_added
 
-        wallet_order = ['oscar_max_bnb', 'oscar_mini_bnb', 'jack_trc20']
+        wallet_order = ['oscar_max_bnb', 'oscar_max_trc20', 'oscar_mini_bnb', 'jack_trc20']
 
         for wallet_name in wallet_order:
             if wallet_name in self.transactions and self.transactions[wallet_name]:
-                currencies = self.transactions[wallet_name]
+                wallet_transactions = self.transactions[wallet_name]
+                wallet_tx_count = len(wallet_transactions)
+
+                currency_sums = defaultdict(float)
+                for tx in wallet_transactions:
+                    currency_sums[tx['currency']] += tx['amount']
 
                 if wallet_name == 'oscar_max_bnb':
                     report_lines.append(f"\n#oscar max bnb")
+                elif wallet_name == 'oscar_max_trc20':
+                    report_lines.append(f"\n#oscar max trc20")
                 elif wallet_name == 'oscar_mini_bnb':
                     report_lines.append(f"\n#oscar MINI Bnb")
                 elif wallet_name == 'jack_trc20':
@@ -111,7 +138,9 @@ class TransactionCalculator:
                 else:
                     report_lines.append(f"\n#{wallet_name}")
 
-                for currency, amount in sorted(currencies.items()):
+                report_lines.append(f"Транзакций: {wallet_tx_count}")
+
+                for currency, amount in sorted(currency_sums.items()):
                     report_lines.append(f"{amount:.2f} {currency}")
 
                     if currency in self.rates:
@@ -119,28 +148,30 @@ class TransactionCalculator:
 
         report_lines.append("\n" + "═" * 40)
         report_lines.append("📈 ОБЩАЯ СТАТИСТИКА:")
-        report_lines.append(f"• Кошельков: {len(self.transactions)}")
-        report_lines.append(f"• Транзакций: {self.count_transactions()}")
+        report_lines.append(f"• Кошельков: {total_wallets}")
+        report_lines.append(f"• Транзакций: {total_transactions}")
         report_lines.append(f"• Общая сумма: ${total_all_usd:.2f} USD")
 
         return "\n".join(report_lines)
 
     def count_transactions(self):
-        count = 0
-        for wallet in self.transactions.values():
-            count += len(wallet)
-        return count
+        return self.total_transactions_added
 
     def clear_all(self):
         self.transactions.clear()
+        self.total_transactions_added = 0
 
     def get_status(self):
         if not self.transactions:
             return None
 
+        total_tx = 0
+        for wallet_txs in self.transactions.values():
+            total_tx += len(wallet_txs)
+
         return {
             'wallet_count': len(self.transactions),
-            'transaction_count': self.count_transactions(),
+            'transaction_count': total_tx,
         }
 
 
@@ -148,8 +179,13 @@ class TransactionBot:
     def __init__(self, token: str):
         self.token = token
         self.calculator = TransactionCalculator()
-        self.user_last_messages = {}  # Храним последние сообщения по user_id
-        self.application = Application.builder().token(token).build()
+        self.user_last_messages = {}
+
+        self.application = Application.builder() \
+            .token(token) \
+            .concurrent_updates(True) \
+            .build()
+
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -162,7 +198,6 @@ class TransactionBot:
 
     async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        # Очищаем предыдущее сообщение
         if user_id in self.user_last_messages:
             del self.user_last_messages[user_id]
 
@@ -188,17 +223,18 @@ class TransactionBot:
             "3. Нажимайте /finish_count для отчета\n\n"
             "Пример транзакций:\n"
             "#oscar max bnb\n"
-            "Received: 19.99 #USDT ($19.99) from Binance\n\n"
+            "Received: 19.99 #USDT ($19.99) from Binance\n"
+            "#oscar max bnb\n"
+            "Received: 29.99 #USDT ($29.99) from Binance\n\n"
             "Что будет в отчете:\n"
             "#oscar max bnb\n"
-            "49.99 USDT\n"
-            "(все суммы показываются в исходной валюте)"
+            "Транзакций: 2\n"
+            "49.98 USDT"
         )
         await update.message.reply_text(message)
 
     async def _finish_count_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        # Очищаем предыдущее сообщение
         if user_id in self.user_last_messages:
             del self.user_last_messages[user_id]
 
@@ -213,7 +249,6 @@ class TransactionBot:
 
     async def _status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        # Очищаем предыдущее сообщение
         if user_id in self.user_last_messages:
             del self.user_last_messages[user_id]
 
@@ -232,7 +267,6 @@ class TransactionBot:
 
     async def _clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        # Очищаем предыдущее сообщение
         if user_id in self.user_last_messages:
             del self.user_last_messages[user_id]
 
@@ -244,7 +278,6 @@ class TransactionBot:
         user_id = update.effective_user.id
         text = update.message.text
 
-        # Парсим ВСЕ транзакции из текста сразу
         transactions_added = self.calculator.add_transactions(text)
 
         if transactions_added > 0:
@@ -257,27 +290,22 @@ class TransactionBot:
                 f"💡 Присылайте дополнительные транзакции или жмите /finish_count чтобы посчитать"
             )
 
-            # Проверяем, есть ли предыдущее сообщение для этого пользователя
             if user_id in self.user_last_messages:
                 last_msg_id = self.user_last_messages[user_id]
                 try:
-                    # Пытаемся отредактировать предыдущее сообщение
                     await context.bot.edit_message_text(
                         chat_id=update.effective_chat.id,
                         message_id=last_msg_id,
                         text=message
                     )
                 except:
-                    # Если не удалось отредактировать, отправляем новое
                     new_message = await update.message.reply_text(message)
                     self.user_last_messages[user_id] = new_message.message_id
             else:
-                # Если нет предыдущего сообщения, отправляем новое
                 new_message = await update.message.reply_text(message)
                 self.user_last_messages[user_id] = new_message.message_id
 
         else:
-            # Очищаем предыдущее сообщение при ошибке
             if user_id in self.user_last_messages:
                 del self.user_last_messages[user_id]
 
@@ -295,4 +323,14 @@ class TransactionBot:
             await update.message.reply_text(message)
 
     def run(self):
-        self.application.run_polling()
+        print("[BOT] Бот запускается...")
+        self.application.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    # Вставьте сюда свой токен
+    TOKEN = "ВАШ_ТОКЕН_ЗДЕСЬ"
+
+    print("[BOT] Запуск бота...")
+    bot = TransactionBot(TOKEN)
+    bot.run()
