@@ -58,7 +58,7 @@ class TransactionCalculator:
                     current_wallet = 'jack_trc20'
                 continue
 
-            if current_wallet and 'received:' in line_lower:
+            if current_wallet:
                 amount, currency = self._extract_transaction(line)
                 if amount and currency:
                     self.transactions[current_wallet].append({
