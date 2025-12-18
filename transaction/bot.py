@@ -112,45 +112,39 @@ class TransactionCalculator:
         report_lines.append(f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
         report_lines.append("─" * 40)
 
-        total_all_usd = 0
-        total_wallets = len(self.transactions)
-        total_transactions = self.total_transactions_added
+        total_usd = 0.0
+        total_transactions = 0
+        wallet_count = len(self.transactions)
 
-        wallet_order = ['oscar_max_bnb', 'oscar_max_trc20', 'oscar_mini_bnb', 'jack_trc20']
+        wallet_titles = {
+            'oscar_max_bnb': '#oscar max bnb',
+            'oscar_max_trc20': '#oscar max trc20',
+            'oscar_mini_bnb': '#oscar mini bnb',
+            'jack_trc20': '#jack med trc20',
+        }
 
-        for wallet_name in wallet_order:
-            if wallet_name in self.transactions and self.transactions[wallet_name]:
-                wallet_transactions = self.transactions[wallet_name]
-                wallet_tx_count = len(wallet_transactions)
+        for wallet, tx_list in self.transactions.items():
+            if not tx_list:
+                continue
 
-                currency_sums = defaultdict(float)
-                for tx in wallet_transactions:
-                    currency_sums[tx['currency']] += tx['amount']
+            report_lines.append(f"\n{wallet_titles.get(wallet, wallet)}")
+            report_lines.append(f"Транзакций: {len(tx_list)}")
 
-                if wallet_name == 'oscar_max_bnb':
-                    report_lines.append(f"\n#oscar max bnb")
-                elif wallet_name == 'oscar_max_trc20':
-                    report_lines.append(f"\n#oscar max trc20")
-                elif wallet_name == 'oscar_mini_bnb':
-                    report_lines.append(f"\n#oscar MINI Bnb")
-                elif wallet_name == 'jack_trc20':
-                    report_lines.append(f"\n#Jack med trc20")
-                else:
-                    report_lines.append(f"\n#{wallet_name}")
+            for tx in tx_list:
+                amount = tx['amount']
+                currency = tx['currency']
+                report_lines.append(f"• {amount:.2f} {currency}")
 
-                report_lines.append(f"Транзакций: {wallet_tx_count}")
+                if currency in self.rates:
+                    total_usd += amount * self.rates[currency]
 
-                for currency, amount in sorted(currency_sums.items()):
-                    report_lines.append(f"{amount:.2f} {currency}")
-
-                    if currency in self.rates:
-                        total_all_usd += amount * self.rates[currency]
+            total_transactions += len(tx_list)
 
         report_lines.append("\n" + "═" * 40)
         report_lines.append("📈 ОБЩАЯ СТАТИСТИКА:")
-        report_lines.append(f"• Кошельков: {total_wallets}")
+        report_lines.append(f"• Кошельков: {wallet_count}")
         report_lines.append(f"• Транзакций: {total_transactions}")
-        report_lines.append(f"• Общая сумма: ${total_all_usd:.2f} USD")
+        report_lines.append(f"• Общая сумма: ${total_usd:.2f} USD")
 
         return "\n".join(report_lines)
 
