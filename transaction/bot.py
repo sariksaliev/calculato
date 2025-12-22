@@ -1,4 +1,3 @@
-# bot.py
 import re
 from collections import defaultdict
 from datetime import datetime
@@ -8,15 +7,21 @@ from telegram import Update
 
 class TransactionCalculator:
     def __init__(self):
+        # wallet_address -> currency -> amount
         self.transactions = defaultdict(lambda: defaultdict(float))
+
         self.rates = {
-            'USDT': 1.0, 'USDC': 1.0, 'BNB': 886.0, 'TRX': 0.12,
-            'ETH': 3500.0, 'BTC': 68000.0, 'SOL': 150.0,
+            'USDT': 1.0,
+            'USDC': 1.0,
+            'BNB': 886.0,
+            'TRX': 0.12,
+            'ETH': 3500.0,
+            'BTC': 68000.0,
+            'SOL': 150.0,
         }
 
-    def add_transactions(self, text):
+    def add_transactions(self, text: str) -> int:
         lines = text.strip().split('\n')
-        current_wallet = None
         transactions_added = 0
 
         for line in lines:
@@ -24,112 +29,76 @@ class TransactionCalculator:
             if not line:
                 continue
 
-            line_lower = line.lower()
-            if 'oscar' in line_lower and 'max' in line_lower and 'bnb' in line_lower:
-                current_wallet = 'oscar_max_bnb'
-                continue
-            elif 'oscar' in line_lower and ('mini' in line_lower or 'mimi' in line_lower) and 'bnb' in line_lower:
-                current_wallet = 'oscar_mini_bnb'
-                continue
-            elif 'jack' in line_lower and 'med' in line_lower and 'trc' in line_lower:
-                current_wallet = 'jack_trc20'
-                continue
-            elif line.startswith('#'):
-                content = line[1:].lower().strip()
-                if 'oscar' in content and 'max' in content:
-                    current_wallet = 'oscar_max_bnb'
-                elif 'oscar' in content and ('mini' in content or 'mimi' in content):
-                    current_wallet = 'oscar_mini_bnb'
-                elif 'jack' in content:
-                    current_wallet = 'jack_trc20'
+            if 'received:' not in line.lower():
                 continue
 
-            if current_wallet and 'received:' in line_lower:
-                amount, currency = self._extract_transaction(line)
-                if amount and currency:
-                    self.transactions[current_wallet][currency] += amount
-                    transactions_added += 1
+            amount, currency, wallet_address = self._extract_transaction(line)
+
+            if amount and currency and wallet_address:
+                self.transactions[wallet_address][currency] += amount
+                transactions_added += 1
 
         return transactions_added
 
-    def _extract_transaction(self, line):
-        patterns = [
-            r'(\d+\.?\d*)\s*#([A-Za-z]{2,})',
-            r'(\d+\.?\d*)\s+([A-Za-z]{2,})',
-            r'#([a-z]{2,})\s*\(.*?(\d+\.?\d*)',
-        ]
+    def _extract_transaction(self, line: str):
+        """
+        Возвращает:
+        amount (float), currency (str), wallet_address (str)
+        """
 
-        for pattern in patterns:
-            match = re.search(pattern, line, re.IGNORECASE)
-            if match:
-                try:
-                    groups = match.groups()
+        amount_currency_pattern = r'Received:\s*([\d.]+)\s*#([A-Za-z]{2,})'
+        wallet_pattern = r'from\s+([A-Za-z0-9\.]{6,})'
 
-                    if pattern == patterns[0]:
-                        amount = float(groups[0])
-                        currency = groups[1].upper()
-                        return amount, currency
+        amount_currency_match = re.search(amount_currency_pattern, line, re.IGNORECASE)
+        wallet_match = re.search(wallet_pattern, line, re.IGNORECASE)
 
-                    elif pattern == patterns[1]:
-                        amount = float(groups[0])
-                        currency = groups[1].upper()
-                        return amount, currency
+        if not amount_currency_match or not wallet_match:
+            return None, None, None
 
-                    elif pattern == patterns[2]:
-                        currency = groups[0].upper()
-                        amount = float(groups[1])
-                        return amount, currency
+        try:
+            amount = float(amount_currency_match.group(1))
+            currency = amount_currency_match.group(2).upper()
+            wallet_address = wallet_match.group(1)
 
-                except (ValueError, IndexError, AttributeError):
-                    continue
+            return amount, currency, wallet_address
+        except ValueError:
+            return None, None, None
 
-        return None, None
-
-    def get_total_report(self):
+    def get_total_report(self) -> str:
         if not self.transactions:
-            return "📭 Нет транзакций для отчета."
+            return "📭 Нет транзакций для отчёта."
 
-        report_lines = []
-        report_lines.append("📊 ОТЧЕТ ПО ТРАНЗАКЦИЯМ")
-        report_lines.append(f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-        report_lines.append("─" * 40)
+        report = []
+        report.append("📊 ОТЧЁТ ПО ТРАНЗАКЦИЯМ")
+        report.append(f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+        report.append("─" * 40)
 
-        total_all_usd = 0
+        total_all_usd = 0.0
+        total_tx_count = 0
 
-        wallet_order = ['oscar_max_bnb', 'oscar_mini_bnb', 'jack_trc20']
+        for wallet_address, currencies in self.transactions.items():
+            report.append(f"\n🔹 Wallet: {wallet_address}")
 
-        for wallet_name in wallet_order:
-            if wallet_name in self.transactions and self.transactions[wallet_name]:
-                currencies = self.transactions[wallet_name]
+            wallet_usd_total = 0.0
 
-                if wallet_name == 'oscar_max_bnb':
-                    report_lines.append(f"\n#oscar max bnb")
-                elif wallet_name == 'oscar_mini_bnb':
-                    report_lines.append(f"\n#oscar MINI Bnb")
-                elif wallet_name == 'jack_trc20':
-                    report_lines.append(f"\n#Jack med trc20")
-                else:
-                    report_lines.append(f"\n#{wallet_name}")
+            for currency, amount in currencies.items():
+                report.append(f"• {amount:.2f} {currency}")
 
-                for currency, amount in sorted(currencies.items()):
-                    report_lines.append(f"{amount:.2f} {currency}")
+                if currency in self.rates:
+                    wallet_usd_total += amount * self.rates[currency]
 
-                    if currency in self.rates:
-                        total_all_usd += amount * self.rates[currency]
+                total_tx_count += 1
 
-        report_lines.append("\n" + "═" * 40)
-        report_lines.append("📈 ОБЩАЯ СТАТИСТИКА:")
-        report_lines.append(f"• Кошельков: {len(self.transactions)}")
-        report_lines.append(f"• Транзакций: {self.count_transactions()}")
-        report_lines.append(f"• Общая сумма: ${total_all_usd:.2f} USD")
+            report.append(f"Итого по кошельку: ${wallet_usd_total:.2f}")
+            total_all_usd += wallet_usd_total
 
-        return "\n".join(report_lines)
+        report.append("\n" + "═" * 40)
+        report.append("📈 ОБЩАЯ СТАТИСТИКА:")
+        report.append(f"• Кошельков: {len(self.transactions)}")
+        report.append(f"• Транзакций: {total_tx_count}")
+        report.append(f"• Общая сумма: ${total_all_usd:.2f} USD")
 
-    def count_transactions(self):
-        count = 0
-        for wallet in self.transactions.values():
-            count += len(wallet)
-        return count
+        return "\n".join(report)
 
     def clear_all(self):
         self.transactions.clear()
@@ -138,161 +107,69 @@ class TransactionCalculator:
         if not self.transactions:
             return None
 
+        tx_count = sum(len(v) for v in self.transactions.values())
+
         return {
-            'wallet_count': len(self.transactions),
-            'transaction_count': self.count_transactions(),
+            "wallet_count": len(self.transactions),
+            "transaction_count": tx_count
         }
 
 
 class TransactionBot:
     def __init__(self, token: str):
-        self.token = token
         self.calculator = TransactionCalculator()
-        self.user_last_messages = {}  # Храним последние сообщения по user_id
         self.application = Application.builder().token(token).build()
         self._setup_handlers()
 
     def _setup_handlers(self):
-        self.application.add_handler(CommandHandler("start", self._start_command))
-        self.application.add_handler(CommandHandler("help", self._help_command))
-        self.application.add_handler(CommandHandler("finish_count", self._finish_count_command))
-        self.application.add_handler(CommandHandler("status", self._status_command))
-        self.application.add_handler(CommandHandler("clear", self._clear_command))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("finish_count", self.finish))
+        self.application.add_handler(CommandHandler("status", self.status))
+        self.application.add_handler(CommandHandler("clear", self.clear))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
 
-    async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        # Очищаем предыдущее сообщение
-        if user_id in self.user_last_messages:
-            del self.user_last_messages[user_id]
-
-        message = (
-            "🤖 Бот-калькулятор транзакций\n\n"
-            "Просто пришлите транзакции текстом.\n"
-            "Я распознаю кошельки и суммы автоматически.\n\n"
-            "Когда все готово - нажмите /finish_count\n\n"
-            "Команды:\n"
-            "/finish_count - посчитать отчет\n"
-            "/status - текущий статус\n"
-            "/clear - очистить все\n"
-            "/help - помощь"
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "🤖 Бот для подсчёта транзакций\n\n"
+            "Отправьте текст с транзакциями.\n"
+            "После завершения нажмите /finish_count"
         )
-        await update.message.reply_text(message)
 
-    async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        message = (
-            "🆘 Помощь\n\n"
-            "Как использовать:\n"
-            "1. Копируйте текст из истории транзакций\n"
-            "2. Присылайте боту\n"
-            "3. Нажимайте /finish_count для отчета\n\n"
-            "Пример транзакций:\n"
-            "#oscar max bnb\n"
-            "Received: 19.99 #USDT ($19.99) from Binance\n\n"
-            "Что будет в отчете:\n"
-            "#oscar max bnb\n"
-            "49.99 USDT\n"
-            "(все суммы показываются в исходной валюте)"
-        )
-        await update.message.reply_text(message)
+    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        added = self.calculator.add_transactions(update.message.text)
 
-    async def _finish_count_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        # Очищаем предыдущее сообщение
-        if user_id in self.user_last_messages:
-            del self.user_last_messages[user_id]
-
-        if not self.calculator.transactions:
-            message = "📭 У вас пока нет транзакций. Пришлите транзакции для расчета."
+        if added > 0:
+            status = self.calculator.get_status()
+            await update.message.reply_text(
+                f"✅ Добавлено транзакций: {added}\n"
+                f"• Кошельков: {status['wallet_count']}\n"
+                f"• Всего транзакций: {status['transaction_count']}"
+            )
         else:
-            message = self.calculator.get_total_report()
-            self.calculator.clear_all()
-            message += "\n\n✅ Отчет готов! Присылайте новые транзакции для следующего расчета."
+            await update.message.reply_text(
+                "❌ Не удалось распознать транзакции.\n"
+                "Проверьте формат строки Received."
+            )
 
-        await update.message.reply_text(message)
+    async def finish(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        report = self.calculator.get_total_report()
+        self.calculator.clear_all()
+        await update.message.reply_text(report)
 
-    async def _status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        # Очищаем предыдущее сообщение
-        if user_id in self.user_last_messages:
-            del self.user_last_messages[user_id]
-
+    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = self.calculator.get_status()
         if not status:
-            message = "📭 Нет активных транзакций. Пришлите транзакции чтобы начать."
+            await update.message.reply_text("📭 Нет активных транзакций.")
         else:
-            message = (
-                f"📊 Текущий статус:\n"
+            await update.message.reply_text(
+                f"📊 Статус:\n"
                 f"• Кошельков: {status['wallet_count']}\n"
-                f"• Транзакций: {status['transaction_count']}\n\n"
-                f"💡 Присылайте дополнительные транзакции или жмите /finish_count чтобы посчитать"
+                f"• Транзакций: {status['transaction_count']}"
             )
 
-        await update.message.reply_text(message)
-
-    async def _clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        # Очищаем предыдущее сообщение
-        if user_id in self.user_last_messages:
-            del self.user_last_messages[user_id]
-
+    async def clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self.calculator.clear_all()
-        message = "✅ Все транзакции очищены. Можете начинать заново!"
-        await update.message.reply_text(message)
-
-    async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        text = update.message.text
-
-        # Парсим ВСЕ транзакции из текста сразу
-        transactions_added = self.calculator.add_transactions(text)
-
-        if transactions_added > 0:
-            status = self.calculator.get_status()
-            message = (
-                f"✅ Обработано транзакций: {transactions_added}\n\n"
-                f"📊 Текущий статус:\n"
-                f"• Кошельков: {status['wallet_count']}\n"
-                f"• Всего транзакций: {status['transaction_count']}\n\n"
-                f"💡 Присылайте дополнительные транзакции или жмите /finish_count чтобы посчитать"
-            )
-
-            # Проверяем, есть ли предыдущее сообщение для этого пользователя
-            if user_id in self.user_last_messages:
-                last_msg_id = self.user_last_messages[user_id]
-                try:
-                    # Пытаемся отредактировать предыдущее сообщение
-                    await context.bot.edit_message_text(
-                        chat_id=update.effective_chat.id,
-                        message_id=last_msg_id,
-                        text=message
-                    )
-                except:
-                    # Если не удалось отредактировать, отправляем новое
-                    new_message = await update.message.reply_text(message)
-                    self.user_last_messages[user_id] = new_message.message_id
-            else:
-                # Если нет предыдущего сообщения, отправляем новое
-                new_message = await update.message.reply_text(message)
-                self.user_last_messages[user_id] = new_message.message_id
-
-        else:
-            # Очищаем предыдущее сообщение при ошибке
-            if user_id in self.user_last_messages:
-                del self.user_last_messages[user_id]
-
-            message = (
-                "❌ Не удалось распознать транзакции\n\n"
-                "Попробуйте скопировать как есть из истории:\n\n"
-                "#oscar max bnb\n"
-                "Received: 19.99 #USDT ($19.99) from Binance Hot wallet\n"
-                "#bnb | Cielo | ViewTx\n\n"
-                "Или:\n"
-                "#Jack med trc20\n"
-                "Received: 199.99 #USDT ($199.99) from MEXC Hot wallet\n"
-                "#trc | Cielo | ViewTx"
-            )
-            await update.message.reply_text(message)
+        await update.message.reply_text("✅ Данные очищены.")
 
     def run(self):
         self.application.run_polling()
