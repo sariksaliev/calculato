@@ -1,24 +1,25 @@
 # main.py
 import logging
+import os
+from dotenv import load_dotenv
+
 from bot import TransactionBot
 
 
 def main():
+    load_dotenv()
+
     logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         level=logging.INFO
     )
 
-    print( "[SYSTEM] Запуск бота...")
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise RuntimeError("Не найден BOT_TOKEN в .env")
 
-    # Вставьте сюда ваш токен
-    TOKEN = "8298002084:AAGv1V8mWeBfuJbTNBILyE5vtUTvg54Luhk"
-
-    try:
-        bot = TransactionBot(TOKEN)
-        bot.run()
-    except Exception as e:
-        logging.error(f"Ошибка при запуске бота: {e}")
+    print("[SYSTEM] Запуск бота...")
+    TransactionBot(token).run()
 
 
 if __name__ == "__main__":
