@@ -16,13 +16,16 @@ class PendingTx:
     network: str
     wallet_short: str
     wallet_full: Optional[str] = None
+    hashtag: Optional[str] = None
 
 
 class TransactionCalculator:
     def __init__(self):
-        # transactions[network][wallet][currency] = sum_amount
-        self.transactions = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+        # transactions[hashtag][currency] = sum_amount
+        # hashtag хранится как есть, например "#oscar max bnb"
+        self.transactions = defaultdict(lambda: defaultdict(float))
         self.total_transactions = 0  # количество обработанных строк Received
+        self.wallets_seen = set()  # для подсчета уникальных кошельков
 
         # Примерные курсы для суммы в USD (можете менять)
         self.rates = {
@@ -51,8 +54,56 @@ class TransactionCalculator:
 
         # Network tags like "#bnb |" or "#tron |"
         self._re_network_tag = re.compile(r'#(bnb|tron|eth)\b', re.IGNORECASE)
+        
+        # Хештег в формате #something ... network (например, #oscar max bnb, #oscar max trc20)
+        self._re_hashtag = re.compile(r'#([^\s]+(?:\s+[^\s]+)*)', re.IGNORECASE)
 
     # ---------- parsing helpers ----------
+
+    def _extract_hashtag_from_text(self, text: str) -> Optional[str]:
+        """Извлекает хештег из текста (например, #oscar max bnb)"""
+        lines = text.strip().split('\n')
+        for line in lines:
+            line = line.strip()
+            # Пропускаем строки с "Received:" и служебные строки
+            if 'received:' in line.lower() or 'переслано' in line.lower() or 'forwarded' in line.lower():
+                continue
+            # Ищем хештег в начале строки
+            if line.startswith('#'):
+                # Если в строке есть |, берем только часть до |
+                if '|' in line:
+                    line = line.split('|')[0].strip()
+                # Извлекаем весь хештег (может быть многословным: #oscar max bnb)
+                # Берем все слова, начинающиеся с #
+                parts = line.split()
+                if parts and parts[0].startswith('#'):
+                    hashtag = ' '.join(parts)  # Берем все слова как хештег
+                    hashtag_lower = hashtag.lower()
+                    # Проверяем, что это не просто тег сети (#bnb, #tron)
+                    simple_tags = ['#bnb', '#tron', '#eth', '#btc', '#sol']
+                    if hashtag_lower not in simple_tags:
+                        # Если хештег содержит пробелы (многословный) или длиннее простого тега - это хештег кошелька
+                        if ' ' in hashtag or len(hashtag) > 5:
+                            return hashtag
+        return None
+
+    def _detect_network_from_hashtag(self, hashtag: str) -> str:
+        """Определяет сеть из хештега (например, #oscar max bnb -> BSC, #oscar max trc20 -> TRON)"""
+        hashtag_lower = hashtag.lower()
+        
+        # Проверяем различные варианты сетей в хештеге
+        if 'trc20' in hashtag_lower or 'tron' in hashtag_lower:
+            return "TRON"
+        if 'bnb' in hashtag_lower:
+            return "BSC"
+        if 'eth' in hashtag_lower or 'ethereum' in hashtag_lower:
+            return "ETH"
+        if 'btc' in hashtag_lower or 'bitcoin' in hashtag_lower:
+            return "BTC"
+        if 'sol' in hashtag_lower or 'solana' in hashtag_lower:
+            return "SOL"
+        
+        return "UNKNOWN"
 
     def _detect_network_from_line(self, line: str) -> str:
         line_l = line.lower()
@@ -118,23 +169,50 @@ class TransactionCalculator:
         lines = text.strip().split('\n')
         added = 0
         pending: Optional[PendingTx] = None
+        current_hashtag = None
+        network_from_hashtag = None
+        
+        # Сначала ищем хештег во всем тексте (для случая одного хештега на все транзакции)
+        global_hashtag = self._extract_hashtag_from_text(text)
+        if global_hashtag:
+            network_from_hashtag = self._detect_network_from_hashtag(global_hashtag)
 
         def finalize_pending():
             nonlocal pending, added
             if not pending:
                 return
 
-            wallet = pending.wallet_full or pending.wallet_short
-            network = pending.network or "UNKNOWN"
+            # Используем хештег для группировки, если он есть
+            if pending.hashtag:
+                hashtag_key = pending.hashtag
+            else:
+                # Если хештега нет, используем сеть как ключ (fallback)
+                hashtag_key = f"#{pending.network}"
 
-            self.transactions[network][wallet][pending.currency] += pending.amount
+            # Добавляем транзакцию по хештегу
+            self.transactions[hashtag_key][pending.currency] += pending.amount
             self.total_transactions += 1
             added += 1
+            
+            # Сохраняем кошелек для статистики
+            wallet = pending.wallet_full or pending.wallet_short
+            if wallet:
+                self.wallets_seen.add(wallet)
+            
             pending = None
 
-        for raw in lines:
+        for i, raw in enumerate(lines):
             line = raw.strip()
             if not line:
+                continue
+
+            # Проверяем, является ли строка хештегом
+            if line.startswith('#') and '|' not in line:
+                # Ищем хештег в этой строке
+                potential_hashtag = self._extract_hashtag_from_text(line)
+                if potential_hashtag:
+                    current_hashtag = potential_hashtag
+                    network_from_hashtag = self._detect_network_from_hashtag(potential_hashtag)
                 continue
 
             # Если пришла строка Received — сначала закрываем прошлую pending, потом создаём новую
@@ -152,14 +230,24 @@ class TransactionCalculator:
                 # пытаемся взять полный адрес прямо из этой же строки
                 net_link, wallet_full = self._extract_full_wallet_from_links(line)
 
-                # сеть определим: сначала по ссылке, иначе по тегу/прочему
-                network = net_link if net_link else self._detect_network_from_line(line)
+                # Используем текущий хештег или глобальный
+                hashtag_to_use = current_hashtag or global_hashtag
+
+                # сеть определим: сначала из хештега, потом по ссылке, иначе по тегу/прочему
+                if network_from_hashtag and network_from_hashtag != "UNKNOWN":
+                    network = network_from_hashtag
+                elif net_link:
+                    network = net_link
+                else:
+                    network = self._detect_network_from_line(line)
 
                 # если полный адрес уже есть — добавляем сразу, pending не нужен
                 if wallet_full:
-                    self.transactions[network][wallet_full][currency] += amount
+                    hashtag_key = hashtag_to_use if hashtag_to_use else f"#{network}"
+                    self.transactions[hashtag_key][currency] += amount
                     self.total_transactions += 1
                     added += 1
+                    self.wallets_seen.add(wallet_full)
                     pending = None
                 else:
                     pending = PendingTx(
@@ -167,7 +255,8 @@ class TransactionCalculator:
                         currency=currency,
                         network=network,
                         wallet_short=wallet_short,
-                        wallet_full=None
+                        wallet_full=None,
+                        hashtag=hashtag_to_use
                     )
                 continue
 
@@ -191,11 +280,12 @@ class TransactionCalculator:
     def clear_all(self):
         self.transactions.clear()
         self.total_transactions = 0
+        self.wallets_seen.clear()
 
     def get_status(self):
         if not self.transactions:
             return None
-        wallet_count = sum(len(wallets) for wallets in self.transactions.values())
+        wallet_count = len(self.wallets_seen)
         return {
             "wallet_count": wallet_count,
             "transaction_count": self.total_transactions,
@@ -206,39 +296,33 @@ class TransactionCalculator:
             return "📭 Нет транзакций для отчёта."
 
         report = []
-        report.append("📊 ОТЧЁТ ПО ТРАНЗАКЦИЯМ")
-        report.append(f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-        report.append("─" * 40)
-
         total_all_usd = 0.0
 
-        # порядок сетей — чтобы было красиво
-        network_order = ["BSC", "ETH", "TRON", "UNKNOWN"]
-        networks = [n for n in network_order if n in self.transactions] + \
-                   [n for n in sorted(self.transactions.keys()) if n not in network_order]
+        # Сортируем хештеги для красивого вывода
+        hashtags = sorted(self.transactions.keys())
 
-        for network in networks:
-            report.append(f"\n🌐 {network}")
-            wallets = self.transactions[network]
+        for hashtag in hashtags:
+            currencies = self.transactions[hashtag]
+            hashtag_total_usd = 0.0
+            
+            # Выводим хештег
+            report.append(hashtag)
+            
+            # Выводим суммы по валютам
+            for cur in sorted(currencies.keys()):
+                amt = currencies[cur]
+                report.append(f"{amt:.2f} {cur}")
+                if cur in self.rates:
+                    hashtag_total_usd += amt * self.rates[cur]
+            
+            total_all_usd += hashtag_total_usd
 
-            for wallet in sorted(wallets.keys()):
-                report.append(f"Wallet: {wallet}")
-                wallet_usd_total = 0.0
-
-                currencies = wallets[wallet]
-                for cur in sorted(currencies.keys()):
-                    amt = currencies[cur]
-                    report.append(f"• {amt:.2f} {cur}")
-                    if cur in self.rates:
-                        wallet_usd_total += amt * self.rates[cur]
-
-                report.append(f"Итого по кошельку: ${wallet_usd_total:.2f}\n")
-                total_all_usd += wallet_usd_total
-
-        wallet_count = sum(len(wallets) for wallets in self.transactions.values())
-
-        report.append("═" * 40)
+        # Разделитель
+        report.append("─" * 40)
+        
+        # Общая статистика
         report.append("📈 ОБЩАЯ СТАТИСТИКА:")
+        wallet_count = len(self.wallets_seen)
         report.append(f"• Кошельков: {wallet_count}")
         report.append(f"• Транзакций: {self.total_transactions}")
         report.append(f"• Общая сумма: ${total_all_usd:.2f} USD")
@@ -250,6 +334,7 @@ class TransactionBot:
     def __init__(self, token: str):
         self.calculator = TransactionCalculator()
         self.application = Application.builder().token(token).build()
+        self.last_hashtag = {}  # user_id -> hashtag для хранения последнего хештега пользователя
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -293,20 +378,60 @@ class TransactionBot:
         )
 
     async def _clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
         self.calculator.clear_all()
+        if user_id in self.last_hashtag:
+            del self.last_hashtag[user_id]
         await update.message.reply_text("✅ Все транзакции очищены. Можно начинать заново!")
 
     async def _finish(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.calculator.transactions:
             await update.message.reply_text("📭 Пока нет транзакций. Пришлите данные.")
             return
+        user_id = update.effective_user.id
         report = self.calculator.get_total_report()
         self.calculator.clear_all()
-        report += "\n\n✅ Отчёт готов! Можете присылать новые транзакции."
+        if user_id in self.last_hashtag:
+            del self.last_hashtag[user_id]
+        report += "\n\n✅ Отчет готов! Присылайте новые транзакции для следующего расчета."
         await update.message.reply_text(report)
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        added = self.calculator.add_transactions(update.message.text)
+        user_id = update.effective_user.id
+        text = update.message.text
+        
+        # Проверяем, является ли сообщение только хештегом (без транзакций)
+        hashtag = self.calculator._extract_hashtag_from_text(text)
+        has_received = 'received:' in text.lower()
+        
+        if hashtag and not has_received:
+            # Сообщение содержит только хештег(и) - сохраняем последний
+            lines = text.strip().split('\n')
+            saved_hashtags = []
+            for line in lines:
+                line = line.strip()
+                if line.startswith('#'):
+                    h = self.calculator._extract_hashtag_from_text(line)
+                    if h:
+                        saved_hashtags.append(h)
+                        self.last_hashtag[user_id] = h
+            if saved_hashtags:
+                hashtags_text = '\n'.join(saved_hashtags)
+                await update.message.reply_text(
+                    f"✅ Хештег(и) сохранён(ы):\n{hashtags_text}\n\n"
+                    f"💡 Будет использован последний: {self.last_hashtag[user_id]}\n"
+                    f"Теперь пришлите транзакции для этого хештега."
+                )
+            else:
+                await update.message.reply_text("❌ Не удалось распознать хештег.")
+            return
+        
+        # Если есть сохраненный хештег и в тексте нет хештега, добавляем его в начало
+        if self.last_hashtag.get(user_id) and not hashtag:
+            text = f"{self.last_hashtag[user_id]}\n{text}"
+            hashtag = self.last_hashtag[user_id]
+        
+        added = self.calculator.add_transactions(text)
         if added > 0:
             st = self.calculator.get_status()
             await update.message.reply_text(
